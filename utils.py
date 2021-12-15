@@ -4,6 +4,11 @@ Functions for the others programs, which are the small utilities.
 - LimeTextExplainer
 """
 import numpy as np
+import sklearn.metrics
+
+def distances_fn(x):
+    return sklearn.metrics.pairwise_distances(
+            x, x[:1, :], metric=distance_metric).ravel() * 100
 
 def reformulation(tokens, sub_index, start=0, sub_method='bert'):
     """For TextInstance.perturbed_data_generation().
