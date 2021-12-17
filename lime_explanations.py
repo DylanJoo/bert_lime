@@ -1,21 +1,13 @@
-"""
-Explanation class, with the required demo output
-- in-memory output (dictionary)
-- writing output (csv file or text file)
-- visualization (bar plot of each)
-"""
-from collections import OrderedDict
+import collections 
 import numpy as np
 
 
-class ExplanationInstance:
+class Explanation:
 
     def __init__(self,
                  mode='classification',
                  class_names=None,
-                 token_repr=None,
-                 binary_repr=None,
-                 seperate_repr=None,
+                 word_repr=None,
                  random_state=None):
         """The object for explanation, which wrapped up all the explanation and the features, 
         for the latter demostration or visualization.
@@ -34,11 +26,11 @@ class ExplanationInstance:
         self.class_names = class_names
 
         # The text information
-        self.token_repr = np.array(token_repr, dtype=object)
-        self.binary_repr = binary_repr
-        self.seperate_repr = seperate_repr
+        self.word_repr = None
 
         # The local explanation results
+        for c in class_names:
+            self.lime
         self.intercept = OrderedDict()
         self.coefficients = OrderedDict()
         self.scores = OrderedDict()
