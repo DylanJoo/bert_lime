@@ -3,22 +3,15 @@ Functions for explaining text classifiers.
 LimeBase: Lime's explainale model g.
 LimeTextExplainer: Lime's locally perturbed explain algorithm.
 """
-from sklearn.linear_model import Ridge, Lasso, ElasticNet
-import sklearn.metrics
-import scipy as sp
-from functools import partial
-# from typing import Optional
 import itertools
 import json
 import re
 import collections
+from functools import partial
 import numpy as np 
-from sklearn.utils import check_random_state
-from transformers import Trainer
+import sklearn.metrics
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
 import torch.nn.functional as f
-
-from utils import batch_iter, flatten_listOflist
-# from models import SimpleLinearRegression
 from lime_dataset import PerturbedDataset
 
 
@@ -27,15 +20,14 @@ class LimeTextExplainer(object):
     def __init__(self,
                  kernel_width=25,
                  kernel=None,
-                 verbose=False,
                  class_names=None,
                  token_selection_method='auto',
-                 split_expression=r'\W+',
-                 bow=True,
                  mask_string=None,
                  random_state=1234,
-                 char_level=False, 
                  output_path='results.jsonl'):
+                 # split_expression=r'\W+',
+                 # char_level=False, 
+                 # bow=True,
 
         if kernel is None:
             def kernel(d, kernel_width):
@@ -47,13 +39,14 @@ class LimeTextExplainer(object):
         self.class_names = class_names
         self.importance = collections.defaultdict(list)
         self.token_selection_method = token_selection_method
-        self.bow = bow
-        self.char_level = char_level
+        # self.bow = bow
+        # self.char_level = char_level
 
         # to be build
         self.label_probs = np.empty((0, len(class_names)))
         self.text_instance = None
         self.output_path = output_path
+        self.f = open(output_path, 'w')
 
 
     def explain_instance(self,
@@ -64,9 +57,9 @@ class LimeTextExplainer(object):
                          distance_metric='cosine',
                          model_regressor=None):
         """Function call for the raw string explaination pipeline.
-        (1) load the explanation object
-        (2) feature selection, return the considered feature (words)
-        (3) Estimation, using the selected X and y
+        (0) Determine a approach for feature (token) selection.
+        (1) feature selection, return the considered feature (words)
+        (2) Estimation, using the selected X and y
 
         Args:
             raw_string: the original text.
@@ -81,18 +74,27 @@ class LimeTextExplainer(object):
         weights = self.kernel_fn(distances_fn(features))
 
         for label in labels:
-            # ***** 2  *****
+            # ***** 0  *****
+            if self.token_selection_method == 'auto':
+                if max_num_features / features.shape[1] >= 0.75:
+                    self.token_selection_method = 'backward'
+                elif max_num_features / feature.shape[1] <= 0.25:
+                    self.token_selection_method = 'forward'
+                else:
+                    self.token_selection_method = 'highest_weight'
+
+            # ***** 1  *****
             idx_fs = self._feature_selection(
                     data=features,
                     labels=prob_target[:, label],
                     weights=weights,
                     num_features=max_num_features,
-                    method='highest_weights', 
+                    method=self.token_selection_method,
                     init_mask=None
             )
             Xs = features[:, idx_fs]
 
-            # ***** 3  *****
+            # ***** 2  *****
             model_g = Ridge(
                     alpha=0, 
                     fit_intercept=False, 
@@ -107,14 +109,14 @@ class LimeTextExplainer(object):
             coefficients[idx_fs] = model_g.coef_
 
             # ***** 4  *****
-            self.importance[self.class_names[label]] = coefficients
+            self.importance[self.class_names[label]] = coefficients.tolist()
 
     def _feature_selection(self,
                            data,
                            labels,
                            weights,
                            num_features=None,
-                           method='highlight_weights',
+                           method='highest_weight',
                            init_mask=None):
 
         """
@@ -132,7 +134,7 @@ class LimeTextExplainer(object):
         assert num_valid_features == len(data[0, :]), 'Inconsistent between data and mask.'
         coefs = np.zeros(num_total_features)
 
-        if method == 'highest_weights':
+        if method == 'highest_weight':
             """
             (a) Ridge regression without intercept. importance of each variables are estimated.
             [TODO] it's better to using regularization for the feature selection model.
@@ -150,7 +152,7 @@ class LimeTextExplainer(object):
         """
         if method == 'backward':
             consideration_mask = ~init_mask
-            model = Ridge(alpha=0, random_state=self.random_state)
+            model = Lasso(alpha=0.01, random_state=self.random_state)
 
             for step in range(num_valid_features - num_features):
                 selected = self.__get_new_feature(data, 
@@ -158,14 +160,14 @@ class LimeTextExplainer(object):
                                                   weights, 
                                                   model, 
                                                   method, 
-                                                  consideraion_mask)
+                                                  consideration_mask)
                 consideration_mask[selected] = True
 
             return np.flatnonzero(~consideration_mask)
 
         if method  == 'forward':
             consideration_mask = ~init_mask
-            model = Ridge(alpha=0, random_state=self.random_state)
+            model = Lasso(alpha=0.01, random_state=self.random_state)
 
             for step in range(num_valid_features):
                 selected = self.__get_new_feature(data, 
@@ -173,7 +175,7 @@ class LimeTextExplainer(object):
                                                   weights, 
                                                   model, 
                                                   method, 
-                                                  consideraion_mask)
+                                                  consideration_mask)
                 consideration_mask[selected] = True
 
             return np.flatnonzero(consideration_mask)
@@ -216,10 +218,12 @@ class LimeTextExplainer(object):
         """
 
         output_dict = {'word': strings}
-        output_dict.update(self.importance)
+        for k, v in self.importance.items():
+            output_dict.update({
+                f"prob_{self.class_names[k]}": self.importance[k]
+            })
         if save_to_json:
-            with open(self.output_path, 'w') as f:
-                f.write(json.dumps(output_dict) + '\n')
+            self.f.write(json.dumps(output_dict) + '\n')
 
         return output_dict
 

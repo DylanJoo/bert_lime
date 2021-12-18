@@ -55,6 +55,7 @@ class PerturbedDataset:
 
     def perturbed_data_generation(self,
                                   num_samples=5000, 
+                                  max_seq_length=128,
                                   distance_metric='cosine',
                                   perturbed_method='mask'):
         """ 
@@ -132,7 +133,7 @@ class PerturbedDataset:
         def tokenization(examples):
             features = self.tokenizer(
                     examples['sentA'], examples['sentB'],
-                    max_length=64,
+                    max_length=max_seq_length,
                     truncation=True,
                     padding='max_length'
             )

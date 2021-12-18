@@ -23,35 +23,38 @@ from transformers import (
         Trainer,
         TrainingArguments,
         DefaultDataCollator,
-        DataCollatorWithPadding,
         HfArgumentParser
 )
 
 @dataclass
+class OurLimeAruguments:
+
+    n_perturb: Optional[int] = field(default=1000)
+    n_nonzero: Optional[int] = field(default=None)
+    feature_selection: Optional[str] = field(default="highest_weight")
+    result_file: Optional[str] = field(default=None)
+
+@dataclass
 class OurModelArguments:
 
-    model_name_or_path: Optional[str] = field(default='bert-base-uncased')
-    model_type: Optional[str] = field(default='bert-base-uncased')
+    model_name_or_path: Optional[str] = field(default='textattack/bert-base-uncased-snli')
+    model_base: Optional[str] = field(default='bert-base-uncased')
     config_name: Optional[str] = field(default='bert-base-uncased')
     tokenizer_name: Optional[str] = field(default='bert-base-uncased')
     cache_dir: Optional[str] = field(default=None)
     use_fast_tokenizer: Optional[bool] = field(default=True)
     model_revision: str = field(default="main")
-    use_auth_token: Optional[bool] = field(default=False)
-
 
 @dataclass
 class OurDataArguments:
 
-    dataset_name: Optional[str] = field(default=None)
-    dataset_config_name: Optional[str] = field(default=None)
     overwrite_cache: Optional[bool] = field(default=False)
-    validation_split_percentage: Optional[int] = field(default=5)
     preprocessing_num_workers: Optional[int] = field(default=None)
-    eval_file: Optional[str] = field(default=None)
-    test_file: Optional[str] = field(default="data.jsonl")
+    eval_file: Optional[str] = field(default="dev.jsonl")
+    test_file: Optional[str] = field(default="test.jsonl")
     max_seq_length: Optional[int] = field(default=128)
     classes_names: List = field(default_factory=lambda: ['contradiction', 'neutral', 'entailment'])
+    pairwise: Optional[bool] = field(default=True)
 
 
 @dataclass
@@ -69,13 +72,15 @@ class OurTrainingArguments(TrainingArguments):
     warmup_steps: int = field(default=1000)
     resume_from_checkpiint: Optional[str] = field(default=None)
 
-def main(lime_args):
+def main():
     # (1) Load the inferencing model (for prediction), which is the lime backbone model.
-    parser = HfArgumentParser((OurModelArguments, OurDataArguments, OurTrainingArguments))
+    parser = HfArgumentParser((
+        OurModelArguments, OurDataArguments, OurTrainingArguments, OurLimeAruguments
+    ))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args, lime_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, lime_args = parser.parse_args_into_dataclasses()
 
     ## config and tokenizer
     config_kwargs = {"output_hidden_states": True}
@@ -87,7 +92,10 @@ def main(lime_args):
     model_kwargs = {"cache_dir": model_args.cache_dir}
 
     ## Option 1: The finetined model 
-    model = AutoModelForSequenceClassification.from_pretrained('textattack/bert-base-uncased-snli')
+    model = AutoModelForSequenceClassification.from_pretrained(
+            model_args.model_name_or_path
+    )
+
     ## Option 2: Finetune my self (or used the pretrained model only (poor))
     # model = AutoModel.from_pretrained(
     #         model_args.model_name_or_path, 
@@ -96,21 +104,20 @@ def main(lime_args):
 
     # (2) Prepare datasets
     dataset = PerturbedDataset(
-            pairwise=True,
+            pairwise=data_args.pairwise,
             tokenizer=tokenizer,
-            device='cpu'
     )
     dataset.from_json(
-            path_json = "data.jsonl"
+            path_json = data_args.test_file
     )
     ## perturbation generation and then tokenization
-    dataset.perturbed_data_generation(num_samples=lime_args.n_perturb)
+    dataset.perturbed_data_generation(
+            num_samples=lime_args.n_perturb,
+            max_seq_length=data_args.max_seq_length,
+            distance_metric='cosine',
+            perturbed_method='mask'
+    )
     ## Data collator
-    # data_collator = DataCollatorWithPadding(
-    #         padding=True,
-    #         max_length=128,
-    #         return_tensors='pt'
-    # )
     data_collator = DefaultDataCollator(
             return_tensors='pt'
     )
@@ -119,27 +126,22 @@ def main(lime_args):
     trainer = Trainer(
             model=model,
             args=training_args,
-            train_dataset=None,
-            eval_dataset=None,
             data_collator=data_collator
     )
     # make the inferencing of logit on "classes"
     results = trainer.predict(
-            test_dataset=dataset['tokenized']
+            test_dataset=dataset['tokenized'],
     )
 
     # (3) Lime Text explainer
     lime = LimeTextExplainer(
             kernel_width=25,
             kernel=None,
-            verbose=False,
             class_names=data_args.classes_names,
-            token_selection_method='auto',
-            split_expression=r'\W+',
-            bow=True,
+            token_selection_method=lime_args.feature_selection,
             mask_string=None,
             random_state=1234,
-            char_level=False,
+            output_path=lime_args.result_file
     )
 
     ## Explain the instance one by one ...
@@ -151,22 +153,16 @@ def main(lime_args):
                 features=features, # 2d array (N x #features)
                 prob_target=probabilities, # 2d array (N x #classes)
                 labels=(0,),
-                max_num_features=None,
+                max_num_features=lime_args.n_nonzero,
                 distance_metric='cosine',
                 model_regressor=None,
         )
         # print(lime.importance)
-        t=lime.get_exp_list(
+        lime.get_exp_list(
                 strings=dataset['perturbed']['wordsB'][s],
                 offset_items=dataset['perturbed']['wordsA'][s],
-                save_to_json=False
+                save_to_json=True if lime_args.result_file is not None else False
         )
-        print(dataset['perturbed']['wordsA'][s])
-        print(t)
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-perturb_per_instance", "--n_perturb", type=int, default=5000)
-    args = parser.parse_args()
-
-    main(args)
+    main()
